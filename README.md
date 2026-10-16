@@ -19,6 +19,16 @@ and there is nothing for anti-cheat to object to.
 - **Works with newer games:** DX9 to DX12, no injection into the game.
 - **Tray only:** right-click the icon to pick a corner, change the screenshot key, or quit.
 
+## Download
+
+Get the latest `fpsm.exe` (or the zip) from the
+[Releases page](https://github.com/rohit267/fpsm/releases/latest). Each release lists SHA-256
+checksums. The exe is not code-signed, so Windows SmartScreen may warn on first run: click
+"More info", then "Run anyway".
+
+Releases are built by GitHub Actions from this repository when a version tag (like `v0.1.0`) is
+pushed, so the exe matches the source.
+
 ## Use
 
 1. Run `fpsm.exe`. It asks for administrator rights once per launch (Windows only lets admins

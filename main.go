@@ -17,6 +17,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// version is set at build time (-X main.version=v0.1.0); "dev" for a plain go build.
+var version = "dev"
+
 func main() {
 	setDPIAware()
 	args := os.Args[1:]
@@ -90,7 +93,7 @@ func onReady(cfg *config, ov *overlay) {
 	systray.SetTitle("fpsm")
 	systray.SetTooltip("fpsm - running")
 
-	header := systray.AddMenuItem("fpsm - running", "")
+	header := systray.AddMenuItem("fpsm "+version+" - running", "")
 	header.Disable()
 	systray.AddSeparator()
 	show := systray.AddMenuItemCheckbox("Show overlay", "", cfg.visible.Load())
