@@ -2,11 +2,12 @@ package main
 
 import "sync"
 
-// Where a present event came from. A process is counted per source and the busiest wins, so a
-// D3D9 game that also touches DXGI (overlays, launchers) is not counted twice.
+// Where a present event came from. DXGI and D3D9 are the runtimes' own present calls; the kernel
+// source sees every present whatever API made it (OpenGL, Vulkan, old APIs).
 const (
 	srcDXGI = iota
 	srcD3D9
+	srcKernel
 	numSrc
 )
 
@@ -56,6 +57,10 @@ func (s *statTable) add(pid uint32, src int, t int64) {
 // fps is the number of presents in the last second for pid. ok is false when the process has
 // not presented recently. Event delivery lags a little, so the window ends at the newest event
 // unless that is over a second old, in which case it ends now (a stall shows as a low number).
+//
+// DXGI and D3D9 counts are preferred because they are the app's own present calls. The kernel
+// count wins only when it is well above them: a Vulkan or OpenGL game that also has a small DXGI
+// overlay or launcher window should show the game's rate, not the overlay's.
 func (s *statTable) fps(pid uint32, now int64) (fps int, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,7 +68,9 @@ func (s *statTable) fps(pid uint32, now int64) (fps int, ok bool) {
 	if ps == nil {
 		return 0, false
 	}
-	for _, l := range ps.ts {
+	var rate [numSrc]int
+	var fresh [numSrc]bool
+	for src, l := range ps.ts {
 		if len(l) == 0 {
 			continue
 		}
@@ -72,18 +79,29 @@ func (s *statTable) fps(pid uint32, now int64) (fps int, ok bool) {
 		if age > staleSecs*s.freq {
 			continue
 		}
-		ok = true
+		fresh[src] = true
 		ref := last
 		if age > s.freq {
 			ref = now
 		}
-		n := 0
 		for i := len(l) - 1; i >= 0 && l[i] > ref-s.freq; i-- {
-			n++
+			rate[src]++
 		}
-		fps = max(fps, n)
 	}
-	return fps, ok
+	api := max(rate[srcDXGI], rate[srcD3D9])
+	apiFresh := fresh[srcDXGI] || fresh[srcD3D9]
+	switch {
+	case !apiFresh && !fresh[srcKernel]:
+		return 0, false
+	case !fresh[srcKernel]:
+		return api, true
+	case !apiFresh:
+		return rate[srcKernel], true
+	case api*10 >= rate[srcKernel]*4: // API count is at least 40% of the kernel's: it is the real one
+		return api, true
+	default:
+		return rate[srcKernel], true
+	}
 }
 
 // active lists every process that presented recently, with its frame rate.

@@ -14,11 +14,14 @@ import (
 // Frame counting without injecting into the game: the DXGI and D3D9 runtimes emit an ETW event
 // every time an app calls Present. Reading those is how PresentMon works, and it covers D3D9/10/11/12
 // games (The Witcher 3 included) without hooks, so there is nothing for anti-cheat to object to
-// and no API Fraps has to hook.
+// and no API Fraps has to hook. OpenGL, Vulkan and older APIs do not go through those runtimes,
+// but every present ends in the Windows graphics kernel, which emits its own event per present.
 
 var (
 	guidDXGI = windows.GUID{Data1: 0xCA11C036, Data2: 0x0102, Data3: 0x4A2D, Data4: [8]byte{0xA6, 0xAD, 0xF0, 0x3C, 0xFE, 0xD5, 0xD3, 0xC9}}
 	guidD3D9 = windows.GUID{Data1: 0x783ACA0A, Data2: 0x790E, Data3: 0x4D7F, Data4: [8]byte{0x84, 0x51, 0xAA, 0x85, 0x05, 0x11, 0xC6, 0xB9}}
+
+	guidDxgKrnl = windows.GUID{Data1: 0x802EC45A, Data2: 0x1E99, Data3: 0x4B83, Data4: [8]byte{0x99, 0x20, 0x87, 0xC9, 0x82, 0x77, 0xBA, 0x9D}}
 )
 
 type provider struct {
@@ -31,6 +34,9 @@ type provider struct {
 var providers = [...]provider{
 	{guidDXGI, "DXGI", srcDXGI, 42},
 	{guidD3D9, "D3D9", srcD3D9, 1},
+	// Every present, whatever API made it, ends in the kernel: this is how OpenGL, Vulkan and older
+	// APIs are seen. Event 184 (0xB8, Present_Info) fires once per swap, attributed to the app.
+	{guidDxgKrnl, "DxgKrnl", srcKernel, 184},
 }
 
 const (
@@ -100,7 +106,7 @@ type propsBuf struct {
 	name [128]uint16
 }
 
-func newProps() *propsBuf {
+func newProps(raw bool) *propsBuf {
 	b := &propsBuf{}
 	b.p.Wnode.BufferSize = uint32(unsafe.Sizeof(*b))
 	b.p.Wnode.Flags = wnodeFlagTracedGUID
@@ -110,6 +116,10 @@ func newProps() *propsBuf {
 	b.p.BufferSize = 2
 	b.p.MinimumBuffers = 8
 	b.p.MaximumBuffers = 256
+	if raw { // probing unfiltered providers: a firehose, so use big buffers
+		b.p.BufferSize = 64
+		b.p.MaximumBuffers = 512
+	}
 	b.p.LogFileMode = logRealTime | logNoPerProcBuf
 	b.p.FlushTimer = 1
 	b.p.LoggerNameOffset = uint32(unsafe.Offsetof(b.name))
@@ -243,28 +253,29 @@ type etw struct {
 	filterDesc eventFilterDescriptor
 	params     enableTraceParameters
 
-	rawMu sync.Mutex
-	raw   map[rawKey]int // event id histogram, only filled in probe --raw mode
+	rawMu  sync.Mutex
+	raw    map[rawKey]int // event id histogram, only filled in probe --raw mode
+	rawPID uint32         // if set, the histogram also counts this process's events separately
 }
 
 // startETW opens a real-time ETW session and feeds every Present event into stats. Needs admin.
 // Delivery is limited to the Present_Start event ids; raw=true turns that filter off and
 // records which event ids show up (for checking the ids on a new Windows build).
-func startETW(stats *statTable, raw bool) (*etw, error) {
-	e := &etw{stats: stats, done: make(chan struct{})}
+func startETW(stats *statTable, raw bool, rawPID uint32) (*etw, error) {
+	e := &etw{stats: stats, done: make(chan struct{}), rawPID: rawPID}
 	if raw {
 		e.raw = make(map[rawKey]int)
 	}
 	e.name, _ = windows.UTF16PtrFromString(sessionName)
 
 	for attempt := 0; ; attempt++ {
-		e.props = newProps()
+		e.props = newProps(raw)
 		r, _, _ := procStartTrace.Call(uintptr(unsafe.Pointer(&e.session)), uintptr(unsafe.Pointer(e.name)), uintptr(unsafe.Pointer(e.props)))
 		if r == 0 {
 			break
 		}
 		if r == errAlreadyExists && attempt == 0 { // left behind by a crashed run
-			stop := newProps()
+			stop := newProps(false)
 			procControlTrace.Call(0, uintptr(unsafe.Pointer(e.name)), uintptr(unsafe.Pointer(stop)), controlStop)
 			continue
 		}
@@ -275,6 +286,9 @@ func startETW(stats *statTable, raw bool) (*etw, error) {
 	}
 
 	for i, p := range providers {
+		if p.presentID == 0 && !raw { // no known present event for this provider yet
+			continue
+		}
 		err := e.enable(i, p, !raw)
 		if err != nil && !raw { // event-id filtering is optional: fall back to every event
 			err = e.enable(i, p, false)
@@ -333,6 +347,9 @@ func (e *etw) onEvent(rec *eventRecord) uintptr {
 		if e.raw != nil {
 			e.rawMu.Lock()
 			e.raw[rawKey{p.name, rec.Id}]++
+			if e.rawPID != 0 && e.rawPID == rec.ProcessId {
+				e.raw[rawKey{p.name + " (target pid)", rec.Id}]++
+			}
 			e.rawMu.Unlock()
 		}
 		if rec.Id != p.presentID {
@@ -356,7 +373,7 @@ func (e *etw) onEvent(rec *eventRecord) uintptr {
 }
 
 func (e *etw) stopSession() {
-	stop := newProps()
+	stop := newProps(false)
 	procControlTrace.Call(0, uintptr(unsafe.Pointer(e.name)), uintptr(unsafe.Pointer(stop)), controlStop)
 }
 

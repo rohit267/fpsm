@@ -62,7 +62,7 @@ func main() {
 
 	cfg := loadConfig()
 	stats := newStatTable(qpcFreq())
-	ev, err := startETW(stats, false)
+	ev, err := startETW(stats, false, 0)
 	if err == errAdminRequired && !elevated {
 		// Not in "Performance Log Users": ask for admin once. Release the mutex so the elevated copy can take it.
 		windows.CloseHandle(mutex)
@@ -204,11 +204,16 @@ func runProbe(args []string) {
 	secs, _ := strconv.Atoi(args[0])
 	out := args[1]
 	raw := len(args) > 2 && args[2] == "--raw"
+	var probePID uint32 // --raw <pid>: count raw events for that process only
+	if raw && len(args) > 3 {
+		n, _ := strconv.Atoi(args[3])
+		probePID = uint32(n)
+	}
 	var sb strings.Builder
 	defer func() { os.WriteFile(out, []byte(sb.String()), 0o644) }()
 
 	stats := newStatTable(qpcFreq())
-	ev, err := startETW(stats, raw)
+	ev, err := startETW(stats, raw, probePID)
 	if err != nil {
 		fmt.Fprintf(&sb, "error: %v\n", err)
 		return
